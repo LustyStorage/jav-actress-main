@@ -36,11 +36,6 @@ jobs:
             ghcr.io/flaresolverr/flaresolverr:latest
           echo "Waiting for FlareSolverr to be ready..."
           sleep 30
-          # Test FlareSolverr with correct method
-          curl -X POST http://localhost:8191/v1 \
-            -H "Content-Type: application/json" \
-            -d '{"cmd":"request.get","url":"https://httpbin.org/anything","maxTimeout":10000}' \
-            || echo "FlareSolverr may not be ready yet"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
