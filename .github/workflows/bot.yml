@@ -11,7 +11,7 @@ on:
       end_page:
         description: 'End page number'
         required: false
-        default: '10'  # Default to 10 for testing, change as needed
+        default: '5'  # Start with 5 for testing
         type: string
 
 permissions:
@@ -21,7 +21,7 @@ permissions:
 jobs:
   sequential_scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 hours max
+    timeout-minutes: 360
     
     steps:
       - name: Checkout Code
@@ -36,7 +36,11 @@ jobs:
             ghcr.io/flaresolverr/flaresolverr:latest
           echo "Waiting for FlareSolverr to be ready..."
           sleep 30
-          curl -s http://localhost:8191/v1 || echo "FlareSolverr may not be ready yet"
+          # Test FlareSolverr with correct method
+          curl -X POST http://localhost:8191/v1 \
+            -H "Content-Type: application/json" \
+            -d '{"cmd":"request.get","url":"https://httpbin.org/anything","maxTimeout":10000}' \
+            || echo "FlareSolverr may not be ready yet"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -48,13 +52,15 @@ jobs:
 
       - name: Run Sequential Scraper
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Use PAT token instead of GITHUB_TOKEN for repo creation
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
           GITHUB_USERNAME: ${{ github.repository_owner }}
           START_PAGE: ${{ github.event.inputs.start_page || '1' }}
-          END_PAGE: ${{ github.event.inputs.end_page || '10' }}
+          END_PAGE: ${{ github.event.inputs.end_page || '5' }}
         run: node index.js
 
       - name: Upload Final Summary
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: scraping-summary
@@ -78,7 +84,9 @@ jobs:
               report += `- **Total Movies:** ${summary.totalMoviesFound}\n`;
               report += `- **Successful:** ${summary.totalSuccessfulDownloads}\n`;
               report += `- **Failed:** ${summary.totalFailedDownloads}\n`;
-              report += `- **Success Rate:** ${((summary.totalSuccessfulDownloads / summary.totalMoviesFound) * 100).toFixed(1)}%\n`;
+              if (summary.totalMoviesFound > 0) {
+                report += `- **Success Rate:** ${((summary.totalSuccessfulDownloads / summary.totalMoviesFound) * 100).toFixed(1)}%\n`;
+              }
               report += `- **Duration:** ${(summary.duration_seconds / 60).toFixed(1)} minutes\n\n`;
               
               report += `## Repositories Created\n`;
@@ -88,6 +96,8 @@ jobs:
                     report += `- **[jav-actress-${page.page}](${page.repository})** - ${page.successful}/${page.total_movies} movies\n`;
                   }
                 }
+              } else {
+                report += `No repositories were created. Please check the error log.\n`;
               }
             }
             
@@ -106,6 +116,6 @@ jobs:
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: `Scraping Complete: Pages ${process.env.START_PAGE || '1'}-${process.env.END_PAGE || '10'}`,
+              title: `Scraping Complete: Pages ${process.env.START_PAGE || '1'}-${process.env.END_PAGE || '5'}`,
               body: report
             });
