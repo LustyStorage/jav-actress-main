@@ -184,7 +184,7 @@ async function processSinglePage(page) {
                             page: page,
                             duplicate_of_page: Array.from(globalMovieIds).indexOf(slug) + 1
                         });
-                        console.log(`  ⚠️ Duplicate found: ${slug} (already in page ${Array.from(globalMovieIds).indexOf(slug) + 1})`);
+                        // console.log(`  ⚠️ Duplicate found: ${slug} (already in page ${Array.from(globalMovieIds).indexOf(slug) + 1})`);
                     } else {
                         globalMovieIds.add(slug);
                         movieIds.push(slug);
@@ -193,9 +193,9 @@ async function processSinglePage(page) {
             }
         });
         
-        console.log(`  Found ${movieIds.length} new unique movie IDs (${globalMovieIds.size} total unique so far)`);
+        // console.log(`  Found ${movieIds.length} new unique movie IDs (${globalMovieIds.size} total unique so far)`);
         if (duplicateMovies.length > 0) {
-            console.log(`  Total duplicates detected across pages: ${duplicateMovies.length}`);
+            // console.log(`  Total duplicates detected across pages: ${duplicateMovies.length}`);
         }
     } catch (error) {
         console.error(`  Failed to fetch sitemap: ${error.message}`);
@@ -203,12 +203,12 @@ async function processSinglePage(page) {
     }
     
     if (movieIds.length === 0) {
-        console.log(`  No new movies found for page ${page} (all duplicates)`);
+        // console.log(`  No new movies found for page ${page} (all duplicates)`);
         return { total: 0, successful: 0 };
     }
     
     // Download ALL movies (no limit)
-    console.log(`  Downloading ${movieIds.length} movies using FlareSolverr...`);
+    // console.log(`  Downloading... ${movieIds.length}`);
     const dataDir = path.join(__dirname, 'temp', `page-${page}`, 'data');
     await fs.ensureDir(dataDir);
     
@@ -219,14 +219,14 @@ async function processSinglePage(page) {
         const movieUrl = `https://missav.ws/en/actresses/${movieId}`;
         
         try {
-            console.log(`    [${i+1}/${movieIds.length}] Downloading ${movieId} using FlareSolverr...`);
+            // console.log(`    [${i+1}/${movieIds.length}] ${movieId}`);
             const html = await fetchWithFlareSolverr(movieUrl);
             await fs.writeFile(path.join(dataDir, `${movieId}.html`), html);
             successCount++;
             
             // Save progress every 10 movies
             if ((i + 1) % 10 === 0) {
-                console.log(`    Progress: ${successCount}/${i+1} (${Math.round(successCount/(i+1)*100)}%)`);
+                // console.log(`    Progress: ${successCount}/${i+1} (${Math.round(successCount/(i+1)*100)}%)`);
             }
             
             await new Promise(resolve => setTimeout(resolve, 1000));
@@ -249,7 +249,7 @@ async function processSinglePage(page) {
     
     await fs.remove(path.join(__dirname, 'temp', `page-${page}`));
     
-    console.log(`✅ Page ${page} complete: ${successCount}/${movieIds.length} movies downloaded`);
+    console.log(`✅ Page ${page} complete: ${successCount}/${movieIds.length} downloaded`);
     
     return { total: movieIds.length, successful: successCount };
 }
@@ -300,7 +300,7 @@ app.get('/discover/movie', async (req, res) => {
             if (!uniqueMovies.has(movie.id)) {
                 uniqueMovies.set(movie.id, movie);
             } else {
-                console.log(`Duplicate filtered: ${movie.id} from page ${movie.page}`);
+                // console.log(`Duplicate filtered: ${movie.id} from page ${movie.page}`);
             }
         }
         
@@ -369,9 +369,9 @@ async function main() {
     globalSummary.totalPages = endPage - startPage + 1;
     
     for (let page = startPage; page <= endPage; page++) {
-        console.log(`\n${'='.repeat(50)}`);
+        // console.log(`\n${'='.repeat(50)}`);
         console.log(`Processing page ${page}/${endPage}`);
-        console.log(`${'='.repeat(50)}`);
+        // console.log(`${'='.repeat(50)}`);
         
         try {
             const result = await processSinglePage(page);
@@ -422,9 +422,9 @@ async function main() {
 // Start
 app.listen(PORT, async () => {
     console.log(`Server on port ${PORT}`);
-    console.log(`📊 Discover endpoint: http://localhost:${PORT}/discover/movie`);
-    console.log(`📊 Duplicates report: http://localhost:${PORT}/discover/duplicates`);
-    console.log(`📊 Statistics: http://localhost:${PORT}/stats`);
+    // console.log(`📊 Discover endpoint: http://localhost:${PORT}/discover/movie`);
+    // console.log(`📊 Duplicates report: http://localhost:${PORT}/discover/duplicates`);
+    // console.log(`📊 Statistics: http://localhost:${PORT}/stats`);
     
     const flaresolverrOk = await testFlareSolverr();
     if (!flaresolverrOk) {
