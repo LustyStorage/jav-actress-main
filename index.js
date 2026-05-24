@@ -12,7 +12,7 @@ const PORT = process.env.PORT || 3000;
 
 // Use PAT token for repo creation
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const GITHUB_USERNAME = process.env.GITHUB_USERNAME || 'LustyStorage';
+const GITHUB_USERNAME = process.env.GITHUB_USERNAME || 'LustryStorage';
 const BASE_REPO_NAME = 'jav-actress';
 
 let globalSummary = {
@@ -27,8 +27,6 @@ let globalSummary = {
 };
 
 let globalErrorLog = [];
-
-// Store all movie IDs across pages to detect duplicates
 let globalMovieIds = new Set();
 let duplicateMovies = [];
 
@@ -45,31 +43,77 @@ async function testFlareSolverr() {
         });
         
         if (response.data && response.data.status === 'ok') {
-            console.log('✅ FlareSolverr is working');
+            console.log('✅ FlareSolverr ready');
             return true;
         }
         return false;
     } catch (error) {
-        console.log('⚠️ FlareSolverr not available');
+        console.error('❌ FlareSolverr required! Make sure it\'s running on port 8191');
         return false;
     }
 }
 
-// Fetch with FlareSolverr (for movie HTML downloads)
-async function fetchWithFlareSolverr(url) {
-    const response = await axios.post('http://localhost:8191/v1', {
-        cmd: 'request.get',
-        url: url,
-        maxTimeout: 60000,
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    }, {
-        headers: { 'Content-Type': 'application/json' }
+// Fetch sitemap with simple axios (no FlareSolverr)
+async function fetchSitemap(url) {
+    const response = await axios.get(url, {
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/xml,text/xml,*/*'
+        },
+        timeout: 10000
     });
+    return response.data;
+}
+
+// Fetch movie HTML with FlareSolverr
+async function fetchMovieWithFlareSolverr(movieId) {
+    const urlsToTry = [
+        `https://missav.ws/en/actresses/${movieId}`,
+        `https://missav.com/en/actresses/${movieId}`,
+        `https://missav.ai/en/actresses/${movieId}`
+    ];
     
-    if (response.data && response.data.status === 'ok') {
-        return response.data.solution.response;
+    for (const url of urlsToTry) {
+        try {
+            const response = await axios.post('http://localhost:8191/v1', {
+                cmd: 'request.get',
+                url: url,
+                maxTimeout: 60000,
+                userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }, {
+                headers: { 'Content-Type': 'application/json' },
+                timeout: 65000
+            });
+            
+            if (response.data && response.data.status === 'ok') {
+                return response.data.solution.response;
+            }
+        } catch (error) {
+            // Try next URL
+        }
     }
-    throw new Error('FlareSolverr failed');
+    throw new Error(`Failed to fetch ${movieId} with FlareSolverr`);
+}
+
+// Find working sitemap URL
+async function findWorkingSitemapUrl(page) {
+    const possibleUrls = [
+        `https://missav.ws/sitemap_actresses_${page}.xml`,
+        `https://missav.live/sitemap_actresses_${page}.xml`,
+        `https://missav.ai/sitemap_actresses_${page}.xml`,
+    ];
+    
+    for (const url of possibleUrls) {
+        try {
+            const data = await fetchSitemap(url);
+            if (data && data.includes('<urlset')) {
+                return { url, data };
+            }
+        } catch (error) {
+            // Continue to next URL
+        }
+    }
+    return null;
 }
 
 // Create repository using PAT
@@ -78,8 +122,6 @@ async function createGitHubRepository(repoName) {
         throw new Error('No GITHUB_TOKEN found');
     }
 
-    console.log(`  Creating repository: ${repoName}...`);
-    
     try {
         const checkResponse = await axios.get(`https://api.github.com/repos/${GITHUB_USERNAME}/${repoName}`, {
             headers: {
@@ -87,17 +129,14 @@ async function createGitHubRepository(repoName) {
                 'Accept': 'application/vnd.github.v3+json'
             }
         });
-        console.log(`  Repository ${repoName} already exists`);
         return checkResponse.data.clone_url;
     } catch (checkError) {
-        if (checkError.response?.status !== 404) {
-            console.log(`  Check error: ${checkError.response?.status}`);
-        }
+        // Repository doesn't exist, create it
     }
     
     const response = await axios.post('https://api.github.com/user/repos', {
         name: repoName,
-        description: `JAV actress data for sitemap page ${repoName.split('-').pop()}`,
+        description: `JAV actress data for page ${repoName.split('-').pop()}`,
         private: false,
         auto_init: true
     }, {
@@ -108,7 +147,7 @@ async function createGitHubRepository(repoName) {
         }
     });
     
-    console.log(`  ✅ Created repository: ${repoName}`);
+    console.log(`  Created: ${repoName}`);
     return response.data.clone_url;
 }
 
@@ -149,42 +188,31 @@ async function pushToGitHub(page, dataDir, repoUrl) {
     }
 }
 
-// Process single page - DOWNLOAD ALL MOVIES
+// Process single page
 async function processSinglePage(page) {
-    console.log(`\n📄 STARTING PAGE ${page}`);
+    console.log(`\n📄 Page ${page}`);
     
     const repoName = `${BASE_REPO_NAME}-${page}`;
     const repoUrl = await createGitHubRepository(repoName);
     
-    console.log(`  Fetching sitemap for page ${page}...`);
-    const sitemapUrl = `https://missav.ws/sitemap_actresses_${page}.xml`;
+    // Get sitemap (simple axios)
+    const sitemapResult = await findWorkingSitemapUrl(page);
     
     let movieIds = [];
-    try {
-        const response = await axios.get(sitemapUrl, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept': 'application/xml,text/xml,*/*'
-            },
-            timeout: 10000
-        });
-        
-        const sitemapContent = response.data;
-        const $ = cheerio.load(sitemapContent, { xmlMode: true });
+    if (sitemapResult && sitemapResult.data) {
+        const $ = cheerio.load(sitemapResult.data, { xmlMode: true });
         
         $('url').each((i, el) => {
             const loc = $(el).find('loc').text().trim();
             if (loc) {
                 const slug = loc.split('/').pop();
                 if (slug && !slug.includes('.xml')) {
-                    // Check for duplicates across pages
                     if (globalMovieIds.has(slug)) {
                         duplicateMovies.push({
                             movieId: slug,
                             page: page,
                             duplicate_of_page: Array.from(globalMovieIds).indexOf(slug) + 1
                         });
-                        // console.log(`  ⚠️ Duplicate found: ${slug} (already in page ${Array.from(globalMovieIds).indexOf(slug) + 1})`);
                     } else {
                         globalMovieIds.add(slug);
                         movieIds.push(slug);
@@ -192,55 +220,46 @@ async function processSinglePage(page) {
                 }
             }
         });
-        
-        // console.log(`  Found ${movieIds.length} new unique movie IDs (${globalMovieIds.size} total unique so far)`);
-        if (duplicateMovies.length > 0) {
-            // console.log(`  Total duplicates detected across pages: ${duplicateMovies.length}`);
-        }
-    } catch (error) {
-        console.error(`  Failed to fetch sitemap: ${error.message}`);
-        return { total: 0, successful: 0 };
     }
     
     if (movieIds.length === 0) {
-        // console.log(`  No new movies found for page ${page} (all duplicates)`);
+        console.log(`  No new movies`);
         return { total: 0, successful: 0 };
     }
     
-    // Download ALL movies (no limit)
-    // console.log(`  Downloading... ${movieIds.length}`);
+    console.log(`  Downloading ${movieIds.length} movies with FlareSolverr...`);
     const dataDir = path.join(__dirname, 'temp', `page-${page}`, 'data');
     await fs.ensureDir(dataDir);
     
     let successCount = 0;
     
+    // Download movies with FlareSolverr
     for (let i = 0; i < movieIds.length; i++) {
         const movieId = movieIds[i];
-        const movieUrl = `https://missav.ws/en/actresses/${movieId}`;
         
         try {
-            // console.log(`    [${i+1}/${movieIds.length}] ${movieId}`);
-            const html = await fetchWithFlareSolverr(movieUrl);
+            const html = await fetchMovieWithFlareSolverr(movieId);
             await fs.writeFile(path.join(dataDir, `${movieId}.html`), html);
             successCount++;
             
-            // Save progress every 10 movies
-            if ((i + 1) % 10 === 0) {
-                // console.log(`    Progress: ${successCount}/${i+1} (${Math.round(successCount/(i+1)*100)}%)`);
+            // Progress indicator
+            if ((i + 1) % 20 === 0 || i + 1 === movieIds.length) {
+                console.log(`    ${successCount}/${movieIds.length}`);
             }
-            
-            await new Promise(resolve => setTimeout(resolve, 1000));
         } catch (error) {
-            console.error(`    Failed: ${error.message}`);
+            // Silent fail
         }
     }
     
+    console.log(`  ✅ ${successCount}/${movieIds.length} downloaded`);
+    
     // Save duplicate report
-    if (duplicateMovies.length > 0) {
+    const pageDuplicates = duplicateMovies.filter(d => d.page === page);
+    if (pageDuplicates.length > 0) {
         await fs.writeJson(path.join(dataDir, '..', 'duplicates.json'), {
             page: page,
-            total_duplicates_found: duplicateMovies.length,
-            duplicates: duplicateMovies.filter(d => d.page === page)
+            total_duplicates_found: pageDuplicates.length,
+            duplicates: pageDuplicates
         }, { spaces: 2 });
     }
     
@@ -249,24 +268,18 @@ async function processSinglePage(page) {
     
     await fs.remove(path.join(__dirname, 'temp', `page-${page}`));
     
-    console.log(`✅ Page ${page} complete: ${successCount}/${movieIds.length} downloaded`);
-    
     return { total: movieIds.length, successful: successCount };
 }
 
-// Discover movies endpoint with duplicate filtering
+// Discover movies endpoint
 app.get('/discover/movie', async (req, res) => {
     try {
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 50;
         const offset = parseInt(req.query.offset) || 0;
-        const search = req.query.search || '';
         
-        // Read from all repositories or local storage
         const allMovies = [];
-        const reposDir = path.join(__dirname, 'temp_repos');
         
-        // Try to read from existing data
         for (let p = 1; p <= globalSummary.processedPages; p++) {
             const repoDataPath = path.join(__dirname, 'temp_repos', `page-${p}`, 'data');
             if (await fs.pathExists(repoDataPath)) {
@@ -275,59 +288,32 @@ app.get('/discover/movie', async (req, res) => {
                 
                 for (const file of htmlFiles) {
                     const movieId = file.replace('.html', '');
-                    const metadataPath = path.join(repoDataPath, `${movieId}.json`);
-                    let metadata = {};
-                    
-                    if (await fs.pathExists(metadataPath)) {
-                        metadata = await fs.readJson(metadataPath);
-                    }
-                    
                     allMovies.push({
                         id: movieId,
-                        title: metadata.title || movieId,
+                        title: movieId,
                         page: p,
                         local_html: `/pages/${p}/${file}`,
-                        poster_path: `https://fourhoi.com/${encodeURIComponent(movieId)}/cover.jpg`,
-                        fetched_at: metadata.fetched_at || null
+                        poster_path: `https://fourhoi.com/${encodeURIComponent(movieId)}/cover.jpg`
                     });
                 }
             }
         }
         
-        // Filter duplicates (keep first occurrence)
         const uniqueMovies = new Map();
         for (const movie of allMovies) {
             if (!uniqueMovies.has(movie.id)) {
                 uniqueMovies.set(movie.id, movie);
-            } else {
-                // console.log(`Duplicate filtered: ${movie.id} from page ${movie.page}`);
             }
         }
         
-        let results = Array.from(uniqueMovies.values());
-        
-        // Apply search filter
-        if (search) {
-            results = results.filter(movie => 
-                movie.id.toLowerCase().includes(search.toLowerCase()) || 
-                movie.title.toLowerCase().includes(search.toLowerCase())
-            );
-        }
-        
-        // Apply pagination
-        const total = results.length;
-        const paginatedResults = results.slice(offset, offset + limit);
+        const results = Array.from(uniqueMovies.values()).slice(offset, offset + limit);
         
         res.json({
             page: page,
             limit: limit,
             offset: offset,
-            total: total,
-            unique_count: uniqueMovies.size,
-            total_with_duplicates: allMovies.length,
-            duplicates_filtered: allMovies.length - uniqueMovies.size,
-            results: paginatedResults,
-            source: 'local'
+            total: uniqueMovies.size,
+            results: results
         });
         
     } catch (err) {
@@ -337,15 +323,11 @@ app.get('/discover/movie', async (req, res) => {
 
 // Get duplicates report
 app.get('/discover/duplicates', async (req, res) => {
-    try {
-        res.json({
-            total_duplicates: duplicateMovies.length,
-            duplicates: duplicateMovies,
-            unique_movies: globalMovieIds.size
-        });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    res.json({
+        total_duplicates: duplicateMovies.length,
+        duplicates: duplicateMovies,
+        unique_movies: globalMovieIds.size
+    });
 });
 
 // Get statistics
@@ -361,6 +343,8 @@ app.get('/stats', async (req, res) => {
 // Main function
 async function main() {
     console.log('🚀 Starting scraper...');
+    console.log('📡 Sitemap: Simple axios');
+    console.log('🎬 Movies: FlareSolverr\n');
     
     const startPage = parseInt(process.env.START_PAGE) || 1;
     const endPage = parseInt(process.env.END_PAGE) || 35;
@@ -369,10 +353,6 @@ async function main() {
     globalSummary.totalPages = endPage - startPage + 1;
     
     for (let page = startPage; page <= endPage; page++) {
-        // console.log(`\n${'='.repeat(50)}`);
-        console.log(`Processing page ${page}/${endPage}`);
-        // console.log(`${'='.repeat(50)}`);
-        
         try {
             const result = await processSinglePage(page);
             globalSummary.processedPages++;
@@ -388,21 +368,15 @@ async function main() {
                 repository: `https://github.com/${GITHUB_USERNAME}/jav-actress-${page}`
             });
             
-            // Save progress after each page
+            // Save progress
             await fs.writeJson('./summary.json', globalSummary, { spaces: 2 });
-            await fs.writeJson('./duplicates.json', { 
-                total_duplicates: duplicateMovies.length,
-                duplicates: duplicateMovies,
-                unique_movies: globalMovieIds.size
-            }, { spaces: 2 });
             
         } catch (error) {
-            console.error(`Failed to process page ${page}:`, error.message);
+            console.error(`Failed page ${page}:`, error.message);
         }
         
         if (page < endPage) {
-            console.log(`\nWaiting 5 seconds...`);
-            await new Promise(resolve => setTimeout(resolve, 5000));
+            await new Promise(resolve => setTimeout(resolve, 2000));
         }
     }
     
@@ -410,30 +384,25 @@ async function main() {
     globalSummary.duration_seconds = (new Date(globalSummary.endTime) - new Date(globalSummary.startTime)) / 1000;
     
     await fs.writeJson('./summary.json', globalSummary, { spaces: 2 });
-    await fs.writeJson('./error_log.json', { errors: globalErrorLog }, { spaces: 2 });
     
     console.log('\n🎉 ALL DONE!');
     console.log(`Pages: ${globalSummary.processedPages}/${globalSummary.totalPages}`);
     console.log(`Unique Movies: ${globalMovieIds.size}`);
-    console.log(`Duplicates Found: ${duplicateMovies.length}`);
-    console.log(`Movies: ${globalSummary.totalSuccessfulDownloads}/${globalSummary.totalMoviesFound}`);
+    console.log(`Success: ${globalSummary.totalSuccessfulDownloads}/${globalSummary.totalMoviesFound}`);
+    console.log(`Time: ${globalSummary.duration_seconds.toFixed(1)}s`);
 }
 
-// Start
+// Start server
 app.listen(PORT, async () => {
     console.log(`Server on port ${PORT}`);
-    // console.log(`📊 Discover endpoint: http://localhost:${PORT}/discover/movie`);
-    // console.log(`📊 Duplicates report: http://localhost:${PORT}/discover/duplicates`);
-    // console.log(`📊 Statistics: http://localhost:${PORT}/stats`);
     
     const flaresolverrOk = await testFlareSolverr();
     if (!flaresolverrOk) {
-        console.error('❌ FlareSolverr is required for downloading HTML!');
         process.exit(1);
     }
     
     if (!GITHUB_TOKEN) {
-        console.error('❌ GITHUB_TOKEN (PAT) is required!');
+        console.error('❌ GITHUB_TOKEN required!');
         process.exit(1);
     }
     
