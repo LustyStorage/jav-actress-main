@@ -377,7 +377,7 @@ async function processSinglePageComplete(page) {
 }
 
 // Main function - process pages ONE BY ONE with complete push before next
-async function processAllPagesSequentially(startPage = 1, endPage = 100) {
+async function processAllPagesSequentially(startPage = 1, endPage = 35) {
     globalSummary.startTime = new Date().toISOString();
     globalSummary.totalPages = endPage - startPage + 1;
     
@@ -568,7 +568,7 @@ app.listen(PORT, async () => {
     
     // Start sequential processing
     const startPage = parseInt(process.env.START_PAGE) || 1;
-    const endPage = parseInt(process.env.END_PAGE) || 100;
+    const endPage = parseInt(process.env.END_PAGE) || 35;
     
     await processAllPagesSequentially(startPage, endPage);
     
