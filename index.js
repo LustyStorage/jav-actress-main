@@ -28,12 +28,12 @@ let globalSummary = {
 
 let globalErrorLog = [];
 
-// Test FlareSolverr
+// Test FlareSolverr - FIXED VERSION
 async function testFlareSolverr() {
     try {
         const response = await axios.post('http://localhost:8191/v1', {
             cmd: 'request.get',
-            url: 'https://httpbin.org/anything',
+            url: 'https://www.google.com',
             maxTimeout: 10000
         }, {
             timeout: 10000,
@@ -51,7 +51,7 @@ async function testFlareSolverr() {
     }
 }
 
-// Fetch with FlareSolverr
+// Fetch with FlareSolverr (for movie HTML downloads)
 async function fetchWithFlareSolverr(url) {
     const response = await axios.post('http://localhost:8191/v1', {
         cmd: 'request.get',
@@ -158,7 +158,7 @@ async function processSinglePage(page) {
     const repoName = `${BASE_REPO_NAME}-${page}`;
     const repoUrl = await createGitHubRepository(repoName);
     
-    // Step 2: Find and parse sitemap
+    // Step 2: Find and parse sitemap (using simple axios, NO FlareSolverr)
     console.log(`  Fetching sitemap for page ${page}...`);
     const sitemapUrl = `https://missav.ws/sitemap_actresses_${page}.xml`;
     
@@ -196,8 +196,8 @@ async function processSinglePage(page) {
         return { total: 0, successful: 0 };
     }
     
-    // Step 3: Download movies
-    console.log(`  Downloading ${movieIds.length} movies...`);
+    // Step 3: Download movies (using FlareSolverr)
+    console.log(`  Downloading ${movieIds.length} movies using FlareSolverr...`);
     const dataDir = path.join(__dirname, 'temp', `page-${page}`, 'data');
     await fs.ensureDir(dataDir);
     
@@ -208,7 +208,7 @@ async function processSinglePage(page) {
         const movieUrl = `https://missav.ws/en/actresses/${movieId}`;
         
         try {
-            console.log(`    [${i+1}/${Math.min(movieIds.length, 10)}] Downloading ${movieId}...`);
+            console.log(`    [${i+1}/${Math.min(movieIds.length, 10)}] Downloading ${movieId} using FlareSolverr...`);
             const html = await fetchWithFlareSolverr(movieUrl);
             await fs.writeFile(path.join(dataDir, `${movieId}.html`), html);
             successCount++;
@@ -287,7 +287,7 @@ app.listen(PORT, async () => {
     
     const flaresolverrOk = await testFlareSolverr();
     if (!flaresolverrOk) {
-        console.error('❌ FlareSolverr is required!');
+        console.error('❌ FlareSolverr is required for downloading HTML!');
         process.exit(1);
     }
     
