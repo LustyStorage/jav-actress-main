@@ -18,9 +18,9 @@ const BASE_REPO_NAME = 'jav-actress';
 // Root directory
 const ROOT_DIR = __dirname;
 
-// FlareSolverr configuration
+// FlareSolverr configuration - FIXED
 const FLARESOLVERR_URL = 'http://localhost:8191/v1';
-let USE_FLARESOLVERR = true;
+let USE_FLARESOLVERR = false; // Default to false, will test
 
 // Global tracking
 let globalErrorLog = [];
@@ -35,116 +35,151 @@ let globalSummary = {
     pages: []
 };
 
-// Function to create GitHub repository
+// Test FlareSolverr correctly
+async function testFlareSolverr() {
+    try {
+        // FlareSolverr expects POST requests, not GET
+        const response = await axios.post(FLARESOLVERR_URL, {
+            cmd: 'request.get',
+            url: 'https://httpbin.org/anything',
+            maxTimeout: 10000
+        }, {
+            timeout: 10000,
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+        
+        if (response.data && response.data.status === 'ok') {
+            console.log('✅ FlareSolverr is connected and working');
+            return true;
+        }
+        console.log('⚠️ FlareSolverr responded but not OK');
+        return false;
+    } catch (error) {
+        console.log('⚠️ FlareSolverr is not running, will use direct requests');
+        return false;
+    }
+}
+
+// Function to fetch with FlareSolverr (for problematic pages)
+async function fetchWithFlareSolverr(url) {
+    try {
+        const response = await axios.post(FLARESOLVERR_URL, {
+            cmd: 'request.get',
+            url: url,
+            maxTimeout: 60000,
+            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        });
+        
+        if (response.data && response.data.status === 'ok') {
+            return response.data.solution.response;
+        }
+        throw new Error('FlareSolverr returned non-OK status');
+    } catch (error) {
+        throw new Error(`FlareSolverr failed: ${error.message}`);
+    }
+}
+
+// Function to fetch with fallback (direct first, then FlareSolverr)
+async function fetchWithFallback(url, useFlareSolverrOnly = false) {
+    // If we must use FlareSolverr only
+    if (useFlareSolverrOnly) {
+        console.log(`  Using FlareSolverr for ${url.substring(0, 50)}...`);
+        return await fetchWithFlareSolverr(url);
+    }
+    
+    // Try direct first (faster)
+    for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+            const response = await axios.get(url, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.5',
+                },
+                timeout: 30000,
+                maxRedirects: 5
+            });
+            
+            if (response.data && response.data.length > 1000) {
+                return response.data;
+            }
+        } catch (error) {
+            if (error.response?.status === 403 || error.response?.status === 503) {
+                console.log(`  Direct blocked (${error.response.status}), trying FlareSolverr...`);
+                break; // Switch to FlareSolverr
+            }
+            if (attempt === 2) {
+                throw error;
+            }
+        }
+    }
+    
+    // If direct failed, use FlareSolverr
+    return await fetchWithFlareSolverr(url);
+}
+
+// Function to create GitHub repository with better error handling
 async function createGitHubRepository(repoName, description = '') {
     if (!GITHUB_TOKEN) {
-        console.log('⚠️  No GITHUB_TOKEN found, skipping repository creation');
+        console.log('⚠️ No GITHUB_TOKEN found');
         return false;
     }
 
     try {
         console.log(`  Creating repository: ${repoName}...`);
+        
+        // First check if repo exists
+        try {
+            const checkResponse = await axios.get(`https://api.github.com/repos/${GITHUB_USERNAME}/${repoName}`, {
+                headers: {
+                    'Authorization': `token ${GITHUB_TOKEN}`,
+                    'Accept': 'application/vnd.github.v3+json'
+                }
+            });
+            if (checkResponse.data) {
+                console.log(`  📚 Repository ${repoName} already exists`);
+                return checkResponse.data.clone_url;
+            }
+        } catch (checkError) {
+            if (checkError.response?.status !== 404) {
+                console.log(`  Check error: ${checkError.response?.status}`);
+            }
+            // 404 means repo doesn't exist, continue to create
+        }
+        
+        // Create new repository
         const response = await axios.post('https://api.github.com/user/repos', {
             name: repoName,
             description: description,
             private: false,
-            auto_init: true
+            auto_init: true,
+            has_issues: true,
+            has_projects: false,
+            has_wiki: false
         }, {
             headers: {
                 'Authorization': `token ${GITHUB_TOKEN}`,
-                'Accept': 'application/vnd.github.v3+json'
+                'Accept': 'application/vnd.github.v3+json',
+                'Content-Type': 'application/json'
             }
         });
         
         console.log(`  ✅ Created repository: ${repoName}`);
         return response.data.clone_url;
+        
     } catch (error) {
-        if (error.response && error.response.status === 422) {
-            console.log(`  📚 Repository ${repoName} already exists, using existing`);
-            return `https://github.com/${GITHUB_USERNAME}/${repoName}.git`;
+        console.error(`  ❌ Failed to create repository: ${error.response?.data?.message || error.message}`);
+        if (error.response?.data?.message === 'Resource not accessible by integration') {
+            console.error(`  ⚠️ GitHub token needs 'write' permission for repositories`);
+            console.error(`  ⚠️ Go to Settings → Actions → General → Workflow permissions → Read and write`);
         }
-        console.error(`  ❌ Failed to create repository: ${error.message}`);
         return false;
     }
 }
 
-// Function to initialize git repository for a page
-async function initPageRepository(page, repoUrl) {
-    const repoDir = path.join(__dirname, 'temp_repos', `page-${page}`);
-    
-    // Remove existing directory if it exists to ensure clean state
-    if (await fs.pathExists(repoDir)) {
-        console.log(`  Cleaning existing directory for page ${page}...`);
-        await fs.remove(repoDir);
-    }
-    
-    await fs.ensureDir(repoDir);
-    
-    try {
-        console.log(`  Initializing git repository for page ${page}...`);
-        
-        // Initialize git
-        await execPromise(`git init`, { cwd: repoDir });
-        
-        // Add remote
-        await execPromise(`git remote add origin ${repoUrl}`, { cwd: repoDir });
-        
-        // Pull any existing content if repository already had data
-        try {
-            await execPromise(`git pull origin main --allow-unrelated-histories`, { cwd: repoDir });
-            console.log(`  Pulled existing content from remote`);
-        } catch (pullError) {
-            console.log(`  No existing content to pull, starting fresh`);
-        }
-        
-        // Create README if it doesn't exist
-        const readmePath = path.join(repoDir, 'README.md');
-        if (!await fs.pathExists(readmePath)) {
-            await fs.writeFile(readmePath, `# ${repoUrl}\n\nJAV actress data for sitemap page ${page}\n\n## Structure\n- \`sitemap.xml\` - Original sitemap data\n- \`movie_ids.json\` - List of all movie IDs\n- \`data/\` - HTML files for each actress\n`, 'utf-8');
-        }
-        
-        // Configure git user
-        await execPromise(`git config user.name "github-actions"`, { cwd: repoDir });
-        await execPromise(`git config user.email "actions@github.com"`, { cwd: repoDir });
-        
-        console.log(`  ✅ Git repository initialized for page ${page}`);
-        return repoDir;
-    } catch (error) {
-        console.error(`  ❌ Failed to initialize git for page ${page}: ${error.message}`);
-        return null;
-    }
-}
-
-// Function to commit and push all changes for a page
-async function commitAndPushAll(page, repoDir, finalPush = false) {
-    if (!repoDir || !GITHUB_TOKEN) return false;
-    
-    try {
-        // Check if there are changes to commit
-        const { stdout } = await execPromise(`git status --porcelain`, { cwd: repoDir });
-        
-        if (stdout.trim()) {
-            const commitMsg = finalPush ? 
-                `Complete: Page ${page} with all data` : 
-                `Update page ${page} data`;
-            
-            await execPromise(`git add .`, { cwd: repoDir });
-            await execPromise(`git commit -m "${commitMsg}"`, { cwd: repoDir });
-            await execPromise(`git push -u origin main`, { cwd: repoDir });
-            
-            console.log(`  📤 Pushed all changes for page ${page} to repository`);
-            return true;
-        } else {
-            console.log(`  No changes to push for page ${page}`);
-            return false;
-        }
-    } catch (error) {
-        console.error(`  ❌ Failed to commit/push for page ${page}: ${error.message}`);
-        return false;
-    }
-}
-
-// Process a single sitemap page completely before moving to next
+// Process a single sitemap page completely
 async function processSinglePageComplete(page) {
     console.log(`\n${'='.repeat(60)}`);
     console.log(`📄 STARTING PAGE ${page}`);
@@ -162,16 +197,8 @@ async function processSinglePageComplete(page) {
         return { totalMovies: 0, successful: 0, failed: 0, error: 'Repository creation failed' };
     }
     
-    // Step 2: Initialize local git repository
-    console.log(`\n📍 Step 2: Initializing local repository...`);
-    const repoDir = await initPageRepository(page, repoUrl);
-    if (!repoDir) {
-        console.log(`❌ Failed to initialize git for page ${page}, skipping...`);
-        return { totalMovies: 0, successful: 0, failed: 0, error: 'Git initialization failed' };
-    }
-    
-    // Step 3: Fetch and parse sitemap
-    console.log(`\n📍 Step 3: Fetching sitemap for page ${page}...`);
+    // Step 2: Fetch and parse sitemap (use FlareSolverr for sitemap if needed)
+    console.log(`\n📍 Step 2: Fetching sitemap for page ${page}...`);
     const sitemapResult = await findWorkingSitemapUrl(page);
     
     let movieIds = [];
@@ -196,21 +223,7 @@ async function processSinglePageComplete(page) {
         
         console.log(`  📊 Found ${movieIds.length} unique movie IDs`);
         
-        // Save sitemap data to repo
-        const dataDir = path.join(repoDir, 'data');
-        await fs.ensureDir(dataDir);
-        await fs.writeFile(path.join(repoDir, 'sitemap.xml'), sitemapResult.data, 'utf-8');
-        await fs.writeJson(path.join(repoDir, 'movie_ids.json'), { 
-            page, 
-            movieIds, 
-            total: movieIds.length,
-            fetched_at: new Date().toISOString()
-        }, { spaces: 2 });
-        
-        // Push sitemap data immediately
-        console.log(`  📤 Pushing sitemap data to repository...`);
-        await commitAndPushAll(page, repoDir, false);
-        
+        // We'll push to GitHub later after downloading all movies
     } else {
         const errorMsg = `Could not find sitemap for page ${page}`;
         console.log(`  ❌ ${errorMsg}`);
@@ -220,15 +233,21 @@ async function processSinglePageComplete(page) {
     
     if (movieIds.length === 0) {
         console.log(`  ⚠️ No movie IDs found for page ${page}, skipping...`);
-        await commitAndPushAll(page, repoDir, true);
         return { totalMovies: 0, successful: 0, failed: 0 };
     }
     
-    // Step 4: Download all movies for this page
-    console.log(`\n📍 Step 4: Downloading ${movieIds.length} movies for page ${page}...`);
+    // Step 3: Download all movies for this page using FlareSolverr
+    console.log(`\n📍 Step 3: Downloading ${movieIds.length} movies for page ${page}...`);
+    console.log(`  💡 Using FlareSolverr for all downloads to avoid blocks`);
+    
     let successCount = 0;
     let failCount = 0;
-    const dataDir = path.join(repoDir, 'data');
+    
+    // Create temp directory for this page
+    const tempDir = path.join(__dirname, 'temp', `page-${page}`);
+    await fs.ensureDir(tempDir);
+    const dataDir = path.join(tempDir, 'data');
+    await fs.ensureDir(dataDir);
     
     for (let i = 0; i < movieIds.length; i++) {
         const movieId = movieIds[i];
@@ -236,7 +255,7 @@ async function processSinglePageComplete(page) {
         const htmlFilePath = path.join(dataDir, `${movieId}.html`);
         const metadataPath = path.join(dataDir, `${movieId}.json`);
         
-        // Check if file already exists
+        // Check if we already downloaded (in case of resume)
         if (await fs.pathExists(htmlFilePath)) {
             const stats = await fs.stat(htmlFilePath);
             if (stats.size > 1000) {
@@ -247,7 +266,7 @@ async function processSinglePageComplete(page) {
         }
         
         try {
-            // Try multiple URL patterns
+            // Try multiple URL patterns with FlareSolverr
             const urlsToTry = [
                 `https://missav.ws/en/actresses/${movieId}`,
                 `https://missav.com/en/actresses/${movieId}`,
@@ -259,16 +278,11 @@ async function processSinglePageComplete(page) {
             
             for (const tryUrl of urlsToTry) {
                 try {
-                    const response = await axios.get(tryUrl, {
-                        headers: {
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-                        },
-                        timeout: 15000
-                    });
-                    if (response.data && response.data.length > 1000) {
-                        htmlContent = response.data;
+                    // Always use FlareSolverr for movie pages (they have Cloudflare)
+                    htmlContent = await fetchWithFlareSolverr(tryUrl);
+                    if (htmlContent && htmlContent.length > 1000) {
                         successfulUrl = tryUrl;
+                        console.log(`  ✅ [${i + 1}/${movieIds.length}] ${movieId} (${(htmlContent.length / 1024).toFixed(1)} KB) - via FlareSolverr`);
                         break;
                     }
                 } catch (e) {
@@ -277,7 +291,7 @@ async function processSinglePageComplete(page) {
             }
             
             if (!htmlContent) {
-                throw new Error('Could not fetch from any URL');
+                throw new Error('Could not fetch from any URL even with FlareSolverr');
             }
             
             // Save HTML file
@@ -296,59 +310,45 @@ async function processSinglePageComplete(page) {
             };
             await fs.writeJson(metadataPath, metadata, { spaces: 2 });
             
-            console.log(`  ✅ [${i + 1}/${movieIds.length}] ${movieId} (${metadata.file_size_kb} KB)`);
             successCount++;
             
-            // Push after every 10 movies to avoid losing progress
-            if ((i + 1) % 10 === 0 || i === movieIds.length - 1) {
-                console.log(`  📤 Pushing progress (${i + 1}/${movieIds.length})...`);
-                await commitAndPushAll(page, repoDir, false);
-            }
-            
-            // Small delay to be respectful
-            await sleep(500);
+            // Small delay to avoid rate limiting
+            await sleep(1000);
             
         } catch (error) {
             console.error(`  ❌ [${i + 1}/${movieIds.length}] ${movieId} - FAILED: ${error.message}`);
             failCount++;
-            
-            // Save error info
             addErrorToLog('movie_fetch', page, movieId, error.message, movieUrl);
             
             const errorFilePath = path.join(dataDir, `${movieId}.error.txt`);
             await fs.writeFile(errorFilePath, `Error: ${error.message}\nURL: ${movieUrl}\nTime: ${new Date().toISOString()}`, 'utf-8');
         }
+        
+        // Update progress every 10 movies
+        if ((i + 1) % 10 === 0) {
+            console.log(`  📊 Progress: ${successCount}/${i + 1} successful (${Math.round(successCount/(i+1)*100)}%)`);
+        }
     }
     
-    // Step 5: Create final summary for this page
-    console.log(`\n📍 Step 5: Creating final summary for page ${page}...`);
-    const summary = {
-        page: page,
-        total_movies: movieIds.length,
-        successful_downloads: successCount,
-        failed_downloads: failCount,
-        success_rate: `${((successCount / movieIds.length) * 100).toFixed(1)}%`,
-        duration_seconds: ((Date.now() - pageStartTime) / 1000).toFixed(1),
-        timestamp: new Date().toISOString(),
-        repo_name: repoName,
-        repo_url: repoUrl,
-        movie_ids: movieIds
-    };
+    // Step 4: Push everything to GitHub
+    console.log(`\n📍 Step 4: Pushing all data to GitHub repository ${repoName}...`);
     
-    await fs.writeJson(path.join(repoDir, 'SUMMARY.json'), summary, { spaces: 2 });
+    const pushSuccess = await pushToGitHub(page, tempDir, repoUrl, movieIds.length, successCount, failCount);
     
-    // Step 6: Final push of everything for this page
-    console.log(`\n📍 Step 6: Final push of all data for page ${page}...`);
-    await commitAndPushAll(page, repoDir, true);
+    if (pushSuccess) {
+        console.log(`  ✅ Successfully pushed all data to ${repoUrl}`);
+    } else {
+        console.log(`  ⚠️ Failed to push to GitHub, data saved locally in ${tempDir}`);
+    }
     
-    // Step 7: Clean up local repository to save space
-    console.log(`\n📍 Step 7: Cleaning up local repository...`);
-    await fs.remove(repoDir);
+    // Step 5: Clean up temp directory
+    console.log(`\n📍 Step 5: Cleaning up...`);
+    await fs.remove(tempDir);
     
     const duration = (Date.now() - pageStartTime) / 1000;
     console.log(`\n${'='.repeat(60)}`);
     console.log(`✅ PAGE ${page} COMPLETE!`);
-    console.log(`   Movies: ${successCount}/${movieIds.length} successful`);
+    console.log(`   Movies: ${successCount}/${movieIds.length} successful (${Math.round(successCount/movieIds.length*100)}%)`);
     console.log(`   Duration: ${duration.toFixed(1)} seconds`);
     console.log(`   Repository: ${repoUrl}`);
     console.log(`${'='.repeat(60)}`);
@@ -376,8 +376,109 @@ async function processSinglePageComplete(page) {
     return { totalMovies: movieIds.length, successful: successCount, failed: failCount };
 }
 
-// Main function - process pages ONE BY ONE with complete push before next
-async function processAllPagesSequentially(startPage = 1, endPage = 35) {
+// Function to push to GitHub
+async function pushToGitHub(page, sourceDir, repoUrl, totalMovies, successCount, failCount) {
+    if (!GITHUB_TOKEN) return false;
+    
+    const cloneDir = path.join(__dirname, 'temp_repos', `page-${page}`);
+    
+    try {
+        // Remove existing directory if any
+        if (await fs.pathExists(cloneDir)) {
+            await fs.remove(cloneDir);
+        }
+        
+        // Clone the repository
+        const repoUrlWithToken = repoUrl.replace('https://', `https://${GITHUB_USERNAME}:${GITHUB_TOKEN}@`);
+        await execPromise(`git clone ${repoUrlWithToken} ${cloneDir}`);
+        
+        // Copy all files
+        await fs.copy(path.join(sourceDir, 'data'), path.join(cloneDir, 'data'));
+        
+        // Create summary files
+        const summary = {
+            page: page,
+            total_movies: totalMovies,
+            successful_downloads: successCount,
+            failed_downloads: failCount,
+            success_rate: `${((successCount / totalMovies) * 100).toFixed(1)}%`,
+            timestamp: new Date().toISOString(),
+            repo_name: `jav-actress-${page}`,
+            repo_url: repoUrl
+        };
+        
+        await fs.writeJson(path.join(cloneDir, 'SUMMARY.json'), summary, { spaces: 2 });
+        
+        const movieIdsList = await fs.readdir(path.join(cloneDir, 'data'));
+        const htmlFiles = movieIdsList.filter(f => f.endsWith('.html'));
+        await fs.writeJson(path.join(cloneDir, 'movie_ids.json'), {
+            page: page,
+            total: htmlFiles.length,
+            movie_ids: htmlFiles.map(f => f.replace('.html', ''))
+        }, { spaces: 2 });
+        
+        // Commit and push
+        await execPromise(`git config user.name "github-actions"`, { cwd: cloneDir });
+        await execPromise(`git config user.email "actions@github.com"`, { cwd: cloneDir });
+        await execPromise(`git add .`, { cwd: cloneDir });
+        await execPromise(`git commit -m "Add data for page ${page}: ${successCount}/${totalMovies} movies"`, { cwd: cloneDir });
+        await execPromise(`git push origin main`, { cwd: cloneDir });
+        
+        // Clean up
+        await fs.remove(cloneDir);
+        
+        return true;
+    } catch (error) {
+        console.error(`  Push failed: ${error.message}`);
+        return false;
+    }
+}
+
+// Find working sitemap URL (use FlareSolverr for sitemaps too)
+async function findWorkingSitemapUrl(page) {
+    const possibleUrls = [
+        `https://missav.ws/sitemap_actresses_${page}.xml`,
+        `https://missav.live/sitemap_actresses_${page}.xml`,
+        `https://missav.ai/sitemap_actresses_${page}.xml`,
+    ];
+    
+    for (const url of possibleUrls) {
+        try {
+            console.log(`  Trying: ${url}`);
+            // Try direct first
+            try {
+                const response = await axios.get(url, {
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'Accept': 'application/xml,text/xml,*/*'
+                    },
+                    timeout: 10000
+                });
+                
+                if (response.data && response.data.includes('<urlset')) {
+                    console.log(`  ✅ Found working URL (direct): ${url}`);
+                    return { url, data: response.data };
+                }
+            } catch (directError) {
+                // If direct fails, try FlareSolverr
+                if (directError.response?.status === 403 || directError.response?.status === 503) {
+                    console.log(`  Direct blocked, trying FlareSolverr...`);
+                    const flareData = await fetchWithFlareSolverr(url);
+                    if (flareData && flareData.includes('<urlset')) {
+                        console.log(`  ✅ Found working URL (FlareSolverr): ${url}`);
+                        return { url, data: flareData };
+                    }
+                }
+            }
+        } catch (error) {
+            // Continue to next URL
+        }
+    }
+    return null;
+}
+
+// Main function - process pages sequentially
+async function processAllPagesSequentially(startPage = 1, endPage = 100) {
     globalSummary.startTime = new Date().toISOString();
     globalSummary.totalPages = endPage - startPage + 1;
     
@@ -386,19 +487,17 @@ async function processAllPagesSequentially(startPage = 1, endPage = 35) {
     console.log(`${'='.repeat(70)}`);
     console.log(`📊 Pages to process: ${startPage} to ${endPage} (${globalSummary.totalPages} pages)`);
     console.log(`📦 Repository pattern: ${BASE_REPO_NAME}-{page}`);
-    console.log(`✨ Each page will be COMPLETELY processed and pushed before moving to next`);
+    console.log(`🛡️  Using FlareSolverr for all downloads to bypass Cloudflare`);
     console.log(`${'='.repeat(70)}\n`);
     
     for (let page = startPage; page <= endPage; page++) {
         console.log(`\n🔄 ========== PROCESSING PAGE ${page}/${endPage} ==========`);
         
         try {
-            // Process current page completely (including final push)
             const pageResult = await processSinglePageComplete(page);
             
-            // Verify that the page was successfully pushed
             if (pageResult.totalMovies > 0 || pageResult.successful > 0) {
-                console.log(`\n✅ Page ${page} VERIFIED - All data pushed to ${BASE_REPO_NAME}-${page}`);
+                console.log(`\n✅ Page ${page} COMPLETE - ${pageResult.successful}/${pageResult.totalMovies} movies saved to ${BASE_REPO_NAME}-${page}`);
             } else if (pageResult.error) {
                 console.log(`\n⚠️ Page ${page} had errors: ${pageResult.error}`);
             }
@@ -410,8 +509,8 @@ async function processAllPagesSequentially(startPage = 1, endPage = 35) {
         
         // Wait before moving to next page
         if (page < endPage) {
-            console.log(`\n⏳ Waiting 3 seconds before processing page ${page + 1}...`);
-            await sleep(3000);
+            console.log(`\n⏳ Waiting 5 seconds before processing page ${page + 1}...`);
+            await sleep(5000);
         }
     }
     
@@ -422,7 +521,7 @@ async function processAllPagesSequentially(startPage = 1, endPage = 35) {
     await saveGlobalErrorLog();
     
     console.log(`\n${'='.repeat(70)}`);
-    console.log(`🎉 ALL PAGES PROCESSED SUCCESSFULLY!`);
+    console.log(`🎉 ALL PAGES PROCESSED!`);
     console.log(`${'='.repeat(70)}`);
     console.log(`\n📊 FINAL STATISTICS:`);
     console.log(`   Pages processed: ${globalSummary.processedPages}/${globalSummary.totalPages}`);
@@ -430,61 +529,7 @@ async function processAllPagesSequentially(startPage = 1, endPage = 35) {
     console.log(`   Total successful: ${globalSummary.totalSuccessfulDownloads}`);
     console.log(`   Total failed: ${globalSummary.totalFailedDownloads}`);
     console.log(`   Success rate: ${((globalSummary.totalSuccessfulDownloads / globalSummary.totalMoviesFound) * 100).toFixed(1)}%`);
-    console.log(`   Total duration: ${globalSummary.duration_seconds.toFixed(1)} seconds (${(globalSummary.duration_seconds / 60).toFixed(1)} minutes)`);
-    
-    console.log(`\n📦 CREATED REPOSITORIES:`);
-    globalSummary.pages.forEach(page => {
-        if (page.repository) {
-            console.log(`   ${page.repository_name}: ${page.repository}`);
-            console.log(`      - ${page.total_movies} movies, ${page.successful} successful`);
-        }
-    });
-    
-    isScrapingComplete = true;
-}
-
-// Test FlareSolverr connection
-async function testFlareSolverr() {
-    try {
-        const response = await axios.get('http://localhost:8191/v1', { timeout: 5000 });
-        console.log('✅ FlareSolverr is connected');
-        return true;
-    } catch (error) {
-        console.log('⚠️  FlareSolverr is not running, will use direct requests');
-        return false;
-    }
-}
-
-// Find working sitemap URL
-async function findWorkingSitemapUrl(page) {
-    const possibleUrls = [
-        `https://missav.ws/sitemap_actresses_${page}.xml`,
-        `https://missav.live/sitemap_actresses_${page}.xml`,
-        `https://missav.ai/sitemap_actresses_${page}.xml`,
-    ];
-    
-    for (const url of possibleUrls) {
-        try {
-            const response = await axios.get(url, {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept': 'application/xml,text/xml,*/*'
-                },
-                timeout: 10000,
-                validateStatus: function (status) {
-                    return status === 200;
-                }
-            });
-            
-            if (response.data && response.data.includes('<urlset')) {
-                console.log(`  ✅ Found working URL: ${url}`);
-                return { url, data: response.data };
-            }
-        } catch (error) {
-            // Continue to next URL
-        }
-    }
-    return null;
+    console.log(`   Total duration: ${(globalSummary.duration_seconds / 60).toFixed(1)} minutes`);
 }
 
 // Helper functions
@@ -503,7 +548,6 @@ async function saveGlobalErrorLog() {
 async function saveGlobalSummary() {
     const summaryPath = path.join(ROOT_DIR, 'summary.json');
     await fs.writeJson(summaryPath, globalSummary, { spaces: 2 });
-    console.log(`📊 Global summary saved`);
 }
 
 function addErrorToLog(errorType, page, movieId, errorMessage, url = null) {
@@ -522,48 +566,26 @@ function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Express endpoints (keeping essential ones)
-app.get('/scraping-status', (req, res) => {
-    res.json({ 
-        isScrapingComplete,
-        summary: {
-            processedPages: globalSummary.processedPages,
-            totalPages: globalSummary.totalPages,
-            totalMoviesFound: globalSummary.totalMoviesFound,
-            totalSuccessfulDownloads: globalSummary.totalSuccessfulDownloads,
-            totalFailedDownloads: globalSummary.totalFailedDownloads,
-            duration_seconds: globalSummary.duration_seconds
-        }
-    });
-});
-
-app.get('/summary', async (req, res) => {
-    try {
-        const summaryPath = path.join(ROOT_DIR, 'summary.json');
-        if (await fs.pathExists(summaryPath)) {
-            const summary = await fs.readJson(summaryPath);
-            res.json(summary);
-        } else {
-            res.json({ message: 'No summary found' });
-        }
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
 // Start the application
 app.listen(PORT, async () => {
     console.log(`✅ Server running on http://localhost:${PORT}`);
-    console.log(`📦 Repositories will be created for each page`);
     
-    await testFlareSolverr();
+    // Test FlareSolverr correctly
+    const flaresolverrWorking = await testFlareSolverr();
+    USE_FLARESOLVERR = flaresolverrWorking;
     
     if (!GITHUB_TOKEN) {
-        console.log('❌ ERROR: No GITHUB_TOKEN environment variable found!');
-        console.log('❌ Please set GITHUB_TOKEN in GitHub Secrets');
+        console.log('❌ ERROR: No GITHUB_TOKEN found!');
+        console.log('❌ Please ensure GitHub token is set in secrets');
         process.exit(1);
     } else {
         console.log(`✅ GitHub token found (user: ${GITHUB_USERNAME})`);
+    }
+    
+    if (USE_FLARESOLVERR) {
+        console.log(`✅ FlareSolverr is working - will use it for all downloads`);
+    } else {
+        console.log(`⚠️ FlareSolverr not available - may encounter Cloudflare blocks`);
     }
     
     // Start sequential processing
@@ -573,5 +595,5 @@ app.listen(PORT, async () => {
     await processAllPagesSequentially(startPage, endPage);
     
     console.log('\n🛑 All done! Shutting down...');
-    setTimeout(() => process.exit(0), 3000);
+    setTimeout(() => process.exit(0), 5000);
 });
