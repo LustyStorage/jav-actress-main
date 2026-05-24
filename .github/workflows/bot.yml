@@ -1,0 +1,111 @@
+name: Sequential JAV Scraper
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_page:
+        description: 'Start page number'
+        required: false
+        default: '1'
+        type: string
+      end_page:
+        description: 'End page number'
+        required: false
+        default: '10'  # Default to 10 for testing, change as needed
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sequential_scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 hours max
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Start FlareSolverr
+        run: |
+          docker run -d \
+            --name=flaresolverr \
+            -p 8191:8191 \
+            -e LOG_LEVEL=info \
+            ghcr.io/flaresolverr/flaresolverr:latest
+          echo "Waiting for FlareSolverr to be ready..."
+          sleep 30
+          curl -s http://localhost:8191/v1 || echo "FlareSolverr may not be ready yet"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Dependencies
+        run: npm install express axios cheerio fs-extra
+
+      - name: Run Sequential Scraper
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_USERNAME: ${{ github.repository_owner }}
+          START_PAGE: ${{ github.event.inputs.start_page || '1' }}
+          END_PAGE: ${{ github.event.inputs.end_page || '10' }}
+        run: node index.js
+
+      - name: Upload Final Summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraping-summary
+          path: |
+            summary.json
+            error_log.json
+          retention-days: 30
+
+      - name: Create Completion Report
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let report = '# ✅ Sequential Scraping Complete\n\n';
+            
+            if (fs.existsSync('summary.json')) {
+              const summary = JSON.parse(fs.readFileSync('summary.json', 'utf8'));
+              report += `## Statistics\n`;
+              report += `- **Pages Processed:** ${summary.processedPages}/${summary.totalPages}\n`;
+              report += `- **Total Movies:** ${summary.totalMoviesFound}\n`;
+              report += `- **Successful:** ${summary.totalSuccessfulDownloads}\n`;
+              report += `- **Failed:** ${summary.totalFailedDownloads}\n`;
+              report += `- **Success Rate:** ${((summary.totalSuccessfulDownloads / summary.totalMoviesFound) * 100).toFixed(1)}%\n`;
+              report += `- **Duration:** ${(summary.duration_seconds / 60).toFixed(1)} minutes\n\n`;
+              
+              report += `## Repositories Created\n`;
+              if (summary.pages && summary.pages.length > 0) {
+                for (const page of summary.pages) {
+                  if (page.repository) {
+                    report += `- **[jav-actress-${page.page}](${page.repository})** - ${page.successful}/${page.total_movies} movies\n`;
+                  }
+                }
+              }
+            }
+            
+            if (fs.existsSync('error_log.json')) {
+              const errors = JSON.parse(fs.readFileSync('error_log.json', 'utf8'));
+              if (errors.total_errors > 0) {
+                report += `\n## ⚠️ Errors (${errors.total_errors})\n`;
+                report += `<details>\n<summary>View errors</summary>\n\n`;
+                for (const error of errors.errors.slice(0, 20)) {
+                  report += `- **Page ${error.page}**: ${error.error}\n`;
+                }
+                report += `\n</details>\n`;
+              }
+            }
+            
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Scraping Complete: Pages ${process.env.START_PAGE || '1'}-${process.env.END_PAGE || '10'}`,
+              body: report
+            });
