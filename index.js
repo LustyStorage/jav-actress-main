@@ -164,7 +164,15 @@ async function processSinglePage(page) {
     
     let movieIds = [];
     try {
-        const sitemapContent = await fetchWithFlareSolverr(sitemapUrl);
+        const response = await axios.get(sitemapUrl, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'application/xml,text/xml,*/*'
+            },
+            timeout: 10000
+        });
+        
+        const sitemapContent = response.data;
         const $ = cheerio.load(sitemapContent, { xmlMode: true });
         
         $('url').each((i, el) => {
